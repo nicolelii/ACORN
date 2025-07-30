@@ -59,15 +59,96 @@ std::vector<int> generate_query_attrs(size_t nq, int gamma) {
     return attrs;
 }
 
+
+#include <faiss/utils/distances.h>   // fvec_L2sqr
+#include <algorithm>
+#include <queue>
+#include <unordered_map>
+#include <vector>
+#include <cstddef>
+
+using Attr = int;
+
+struct Cand {
+    float dist;
+    faiss::idx_t id;
+};
+struct WorseFirst {
+    // max-heap by distance
+    bool operator()(const Cand& a, const Cand& b) const { return a.dist < b.dist; }
+};
+
+// Optional: build once and reuse across calls if metadata is stable.
+static std::unordered_map<Attr, std::vector<faiss::idx_t>>
+build_attr_buckets(const std::vector<int>& metadata) {
+    std::unordered_map<Attr, std::vector<faiss::idx_t>> buckets;
+    buckets.reserve(metadata.size());
+    for (faiss::idx_t i = 0; i < (faiss::idx_t)metadata.size(); ++i) {
+        buckets[metadata[i]].push_back(i);
+    }
+    return buckets;
+}
+
+std::vector<faiss::idx_t>
+compute_filtered_gt(const float* xq, size_t nq, size_t d,
+                                 const float* xb, size_t /*nb*/,
+                    			 const std::vector<int>& metadata,
+                                 const std::vector<int>& query_attrs,
+                                 int k)
+{
+    auto buckets = build_attr_buckets(metadata);
+
+    std::vector<faiss::idx_t> gt(nq * (size_t)k, faiss::idx_t(-1));
+    if (k <= 0) return gt;
+
+    #pragma omp parallel for schedule(static)
+    for (ptrdiff_t q = 0; q < (ptrdiff_t)nq; ++q) {
+        const float* qvec = xq + (size_t)q * d;
+
+        // Stream only over candidates sharing the query's attribute.
+        auto it = buckets.find(query_attrs[(size_t)q]);
+        if (it == buckets.end() || it->second.empty()) continue;
+
+        std::priority_queue<Cand, std::vector<Cand>, WorseFirst> topk;
+        topk = std::priority_queue<Cand, std::vector<Cand>, WorseFirst>(); // ensure per-thread storage
+
+        for (faiss::idx_t idx : it->second) {
+            const float* bvec = xb + (size_t)idx * d;
+            // FAISS’ L2 kernel is vectorized and quite fast.
+            float dist = faiss::fvec_L2sqr(qvec, bvec, (int)d);
+
+            if ((int)topk.size() < k) {
+                topk.push({dist, idx});
+            } else if (dist < topk.top().dist) {
+                topk.pop();
+                topk.push({dist, idx});
+            }
+        }
+
+        // Extract in ascending distance order into gt[q]
+        int out = std::min((int)topk.size(), k);
+        for (int i = out - 1; i >= 0; --i) {
+            gt[(size_t)q * k + i] = topk.top().id;
+            topk.pop();
+        }
+        // any remaining positions stay at -1
+    }
+    return gt;
+}
+
+/*
 std::vector<faiss::idx_t> compute_filtered_gt(const float* xq, size_t nq, size_t d,
     const float* xb, size_t nb,
     const std::vector<int>& metadata,
     const std::vector<int>& query_attrs,
     int k) {
 
+
+
     std::vector<faiss::idx_t> gt(nq * k);
     for (size_t q = 0; q < nq; q++) {
-        std::vector<std::pair<float, faiss::idx_t>> cands;
+		int highest_dist = 0;
+        std::vector<std::pair<float, faiss::idx_t>> cands(10);
         for (size_t i = 0; i < nb; i++) {
             if (metadata[i] == query_attrs[q]) {
                 float dist = 0;
@@ -83,12 +164,13 @@ std::vector<faiss::idx_t> compute_filtered_gt(const float* xq, size_t nq, size_t
     }
     return gt;
 }
+*/
 
 int main() {
     const size_t d = 128, N = 1000000;
     const int M = 32, efc = 40, gamma = 12, M_beta = 64, k = 10;
-    const std::vector<int> batch_sizes = {1, 2, 4, 8, 16, 32, 64, 128};
-    const std::vector<int> efSearch_vals = {1, 2, 4, 8, 16, 32, 64, 128};
+    const std::vector<int> batch_sizes = {32, 64, 128};
+    const std::vector<int> efSearch_vals = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 
     printf("====================\nACORN-gamma SIFT1M Sweep\n====================\n");
     printf("Parameters: d=%zu, M=%d, efc=%d, gamma=%d, M_beta=%d, k=%d\n",
@@ -120,18 +202,25 @@ int main() {
     // printf("[%.3f s] Creating ACORN-gamma index\n", elapsed() - t0);
     printf("[%.3f s] Creating ACORN-gamma index\n",
     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-    faiss::IndexACORNFlat acorn(d, M, gamma, metadata, M_beta);
-    acorn.add(N, xb);
+	faiss::IndexACORNFlat* acorn;
+	try {
+    	faiss::Index* base = faiss::read_index("acorn.index");
+		acorn = dynamic_cast<faiss::IndexACORNFlat*>(base);
+	} catch (...) {
+		acorn = new faiss::IndexACORNFlat(d, M, gamma, metadata, M_beta);
+    	acorn->add(N, xb);
+    	faiss::write_index(acorn, "acorn.index");
+	}
 
-    //save to disk
-    faiss::write_index(&acorn, "acorn.index");
-
-    // printf("[%.3f s] Computing filtered ground truth\n", elapsed() - t0);
     printf("[%.3f s] Computing filtered ground truth\n",
     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 
     
     std::vector<faiss::idx_t> filtered_gt = compute_filtered_gt(xq, nq, d, xb, N, metadata, query_attrs, k);
+
+
+    printf("[%.3f s] Computing filter map\n",
+    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 
     std::vector<char> filter_map(nq * N);
     for (size_t q = 0; q < nq; q++) {
@@ -139,9 +228,13 @@ int main() {
             filter_map[q * N + i] = (metadata[i] == query_attrs[q]);
         }
     }
+    printf("[%.3f s] Done with setup.\n",
+    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+
 
     std::vector<faiss::idx_t> results(k * nq);
     std::vector<float> distances(k * nq);
+
 
     printf("\n====================\nBATCH SIZE + efSearch SWEEP\n====================\n");
     printf("BatchSize\tefSearch\tTime(s)\t\tR@10\t\tQPS\n");
@@ -156,7 +249,7 @@ int main() {
             auto t1 = std::chrono::steady_clock::now();
             for (size_t start = 0; start < nq; start += batch_size) {
                 size_t cur = std::min((size_t)batch_size, nq - start);
-                acorn.search(cur,
+                acorn->search(cur,
                              xq + start * d,
                              k,
                              distances.data() + start * k,
