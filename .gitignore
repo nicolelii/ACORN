@@ -8,6 +8,7 @@
 *.pyc
 *~
 sift
+build
 /config.*
 /aclocal.m4
 /autom4te.cache/
