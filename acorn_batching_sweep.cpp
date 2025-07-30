@@ -108,7 +108,7 @@ int main() {
 
     printf("Loaded %zu base vectors\n", N);
     // printf("[%.3f s] Loading SIFT1M query vectors\n", elapsed() - t0);
-    printf("[%.3f s] Loading SIFT1M base vectors\n",
+    printf("[%.3f s] Loading SIFT1M query vectors\n",
     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 
     float* xq = fvecs_read("sift/sift_query.fvecs", &d2, &nq);
