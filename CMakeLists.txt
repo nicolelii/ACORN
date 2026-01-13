@@ -46,6 +46,11 @@ add_subdirectory(demos)
 add_subdirectory(benchs)
 add_subdirectory(tutorial/cpp)
 
+# Add experiments directory if it exists
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../experiments)
+  add_subdirectory(../experiments experiments)
+endif()
+
 # CTest must be included in the top level to enable `make test` target.
 include(CTest)
 if(BUILD_TESTING)
@@ -78,6 +83,15 @@ if(NOT nlohmann_json_POPULATED)
 endif()
 
 target_include_directories(faiss PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
+
+# Fetch CLI11 for command-line parsing in experiments
+FetchContent_Declare(
+    cli11
+    GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+    GIT_TAG v2.3.2
+)
+
+FetchContent_MakeAvailable(cli11)
 
 find_package(ZLIB REQUIRED)
 target_link_libraries(faiss PUBLIC ${ZLIB_LIBRARIES})
